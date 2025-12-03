@@ -4,8 +4,10 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -43,6 +45,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // Receiver para escuchar cambios en el estado de Bluetooth en tiempo real.
+    private val bluetoothStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
+                refreshSignal.value++ // Forzar un refresco de la UI.
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         BluetoothManager.init(applicationContext)
@@ -59,9 +70,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onResume() {
-        super.onResume()
+    override fun onStart() {
+        super.onStart()
+        registerReceiver(bluetoothStateReceiver, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED))
         refreshSignal.value++
+    }
+
+    override fun onStop() {
+        super.onStop()
+        unregisterReceiver(bluetoothStateReceiver)
     }
 
     override fun onDestroy() {
@@ -84,8 +101,22 @@ class MainActivity : ComponentActivity() {
                 if (BluetoothManager.isEnabled()) {
                     pairedDevices = BluetoothManager.getPairedDevices().toList()
                     connectedMac = BluetoothManager.getConnectedDeviceAddress()
+                } else {
+                    pairedDevices = emptyList()
+                    connectedMac = null
                 }
             }
+        }
+
+        if (!isBtEnabled) {
+            Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("Bluetooth está desactivado", style = MaterialTheme.typography.headlineSmall)
+                Spacer(modifier = Modifier.height(16.dp))
+                Button(onClick = { enableBluetooth() }) {
+                    Text("Activar Bluetooth")
+                }
+            }
+            return
         }
 
         Column(modifier = Modifier.padding(16.dp)) {
@@ -98,53 +129,44 @@ class MainActivity : ComponentActivity() {
             )
             Spacer(modifier = Modifier.height(16.dp))
 
-            if (isBtEnabled) {
-                // Botón unificado para Conectar/Desconectar
-                Button(onClick = {
-                    val mac = getSavedMac(context)
-                    if (mac.isNullOrBlank()) {
-                        Toast.makeText(context, "Primero selecciona una impresora.", Toast.LENGTH_SHORT).show()
-                        return@Button
-                    }
-                    coroutineScope.launch {
-                        if (connectedMac == null) {
-                            Toast.makeText(context, "Conectando a $mac...", Toast.LENGTH_SHORT).show()
-                            val result = BluetoothManager.establishConnection(mac)
-                            if (result.isSuccess) Toast.makeText(context, "Conexión Exitosa", Toast.LENGTH_SHORT).show()
-                            else Toast.makeText(context, "Fallo de conexión: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
-                        } else {
-                            BluetoothManager.closeConnection()
-                            Toast.makeText(context, "Desconectado", Toast.LENGTH_SHORT).show()
-                        }
-                        onRefresh()
-                    }
-                }, modifier = Modifier.fillMaxWidth()) {
-                    Text(if (connectedMac == null) "Conectar" else "Desconectar")
+            Button(onClick = {
+                val mac = getSavedMac(context)
+                if (mac.isNullOrBlank()) {
+                    Toast.makeText(context, "Primero selecciona una impresora.", Toast.LENGTH_SHORT).show()
+                    return@Button
                 }
-                Spacer(modifier = Modifier.height(8.dp))
-
-                // Botón para imprimir página de prueba
-                Button(onClick = {
-                     val mac = getSavedMac(context)
-                    if (mac.isNullOrBlank()) {
-                        Toast.makeText(context, "Primero selecciona una impresora.", Toast.LENGTH_SHORT).show()
-                        return@Button
+                coroutineScope.launch {
+                    if (connectedMac == null) {
+                        Toast.makeText(context, "Conectando a $mac...", Toast.LENGTH_SHORT).show()
+                        val result = BluetoothManager.establishConnection(mac)
+                        if (result.isSuccess) Toast.makeText(context, "Conexión Exitosa", Toast.LENGTH_SHORT).show()
+                        else Toast.makeText(context, "Fallo de conexión: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
+                    } else {
+                        BluetoothManager.closeConnection()
+                        Toast.makeText(context, "Desconectado", Toast.LENGTH_SHORT).show()
                     }
-                     coroutineScope.launch {
+                    onRefresh()
+                }
+            }, modifier = Modifier.fillMaxWidth()) {
+                Text(if (connectedMac == null) "Conectar" else "Desconectar")
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Button(
+                onClick = {
+                    val mac = getSavedMac(context) ?: return@Button
+                    coroutineScope.launch {
                         Toast.makeText(context, "Imprimiendo página de prueba...", Toast.LENGTH_SHORT).show()
                         val result = BluetoothManager.testPrint(mac)
                         if (!result.isSuccess) {
                             Toast.makeText(context, "Error al imprimir: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
                         }
-                     }
-                }, modifier = Modifier.fillMaxWidth()) {
-                    Text("Imprimir Página de Prueba")
-                }
-
-            } else {
-                Button(onClick = { enableBluetooth() }, modifier = Modifier.fillMaxWidth()) {
-                    Text("Activar Bluetooth")
-                }
+                    }
+                },
+                enabled = connectedMac != null, // Botón deshabilitado si no hay conexión
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Imprimir Página de Prueba")
             }
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -153,16 +175,16 @@ class MainActivity : ComponentActivity() {
 
             Spacer(modifier = Modifier.height(16.dp))
             Text("Dispositivos emparejados:", style = MaterialTheme.typography.titleMedium)
-            if (!isBtEnabled) {
-                Text("Bluetooth está desactivado.", modifier = Modifier.padding(top = 8.dp))
-            } else if (pairedDevices.isEmpty()) {
-                Text("No hay impresoras emparejadas. Ve a los Ajustes de Bluetooth para emparejar tu impresora.", modifier = Modifier.padding(top = 8.dp).clickable { openBluetoothSettings() })
-            } else {
-                LazyColumn(modifier = Modifier.weight(1f)) {
-                    items(pairedDevices) { device ->
-                        DeviceRow(device = device, isDefault = device.address == defaultMac) {
-                            saveMac(context, device.address)
-                            defaultMac = device.address
+            LazyColumn(modifier = Modifier.weight(1f)) {
+                items(pairedDevices) { device ->
+                    DeviceRow(device = device, isDefault = device.address == defaultMac) {
+                        saveMac(context, device.address)
+                        coroutineScope.launch {
+                            Toast.makeText(context, "Guardado y conectando...", Toast.LENGTH_SHORT).show()
+                            val result = BluetoothManager.establishConnection(device.address)
+                            if (!result.isSuccess) {
+                                Toast.makeText(context, "Fallo al conectar.", Toast.LENGTH_SHORT).show()
+                            }
                             onRefresh()
                         }
                     }
