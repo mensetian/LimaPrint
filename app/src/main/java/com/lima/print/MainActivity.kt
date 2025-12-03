@@ -66,7 +66,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        // Asegurarse de cerrar la conexión al destruir la actividad principal
         BluetoothManager.closeConnection()
     }
 
@@ -84,7 +83,6 @@ class MainActivity : ComponentActivity() {
             if (checkAndRequestPermissions(context)) {
                 if (BluetoothManager.isEnabled()) {
                     pairedDevices = BluetoothManager.getPairedDevices().toList()
-                    // Actualizar el estado de conexión al refrescar
                     connectedMac = BluetoothManager.getConnectedDeviceAddress()
                 }
             }
@@ -93,43 +91,56 @@ class MainActivity : ComponentActivity() {
         Column(modifier = Modifier.padding(16.dp)) {
             Text("Configuración de LimaPrint", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(bottom = 16.dp))
 
-            // Sección de Conexión
-            Text("Estado de la Impresora:", style = MaterialTheme.typography.titleMedium)
+            Text("Estado:", style = MaterialTheme.typography.titleMedium)
             Text(
                 text = if (connectedMac != null) "Conectado a $connectedMac" else "Desconectado",
                 color = if (connectedMac != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
             )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
             if (isBtEnabled) {
-                 Row(modifier = Modifier.fillMaxWidth()) {
-                    Button(onClick = {
-                        val mac = getSavedMac(context)
-                        if (mac.isNullOrBlank()) {
-                            Toast.makeText(context, "Primero selecciona una impresora.", Toast.LENGTH_SHORT).show()
+                // Botón unificado para Conectar/Desconectar
+                Button(onClick = {
+                    val mac = getSavedMac(context)
+                    if (mac.isNullOrBlank()) {
+                        Toast.makeText(context, "Primero selecciona una impresora.", Toast.LENGTH_SHORT).show()
+                        return@Button
+                    }
+                    coroutineScope.launch {
+                        if (connectedMac == null) {
+                            Toast.makeText(context, "Conectando a $mac...", Toast.LENGTH_SHORT).show()
+                            val result = BluetoothManager.establishConnection(mac)
+                            if (result.isSuccess) Toast.makeText(context, "Conexión Exitosa", Toast.LENGTH_SHORT).show()
+                            else Toast.makeText(context, "Fallo de conexión: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
                         } else {
-                            coroutineScope.launch {
-                                Toast.makeText(context, "Conectando a $mac...", Toast.LENGTH_SHORT).show()
-                                val result = BluetoothManager.establishConnection(mac)
-                                if (result.isSuccess) {
-                                    Toast.makeText(context, "Conexión Exitosa", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    Toast.makeText(context, "Fallo de conexión: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
-                                }
-                                onRefresh()
-                            }
+                            BluetoothManager.closeConnection()
+                            Toast.makeText(context, "Desconectado", Toast.LENGTH_SHORT).show()
                         }
-                    }, modifier = Modifier.weight(1f)) {
-                        Text("Conectar")
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Button(onClick = {
-                        BluetoothManager.closeConnection()
                         onRefresh()
-                    }, modifier = Modifier.weight(1f)) {
-                        Text("Desconectar")
                     }
+                }, modifier = Modifier.fillMaxWidth()) {
+                    Text(if (connectedMac == null) "Conectar" else "Desconectar")
                 }
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Botón para imprimir página de prueba
+                Button(onClick = {
+                     val mac = getSavedMac(context)
+                    if (mac.isNullOrBlank()) {
+                        Toast.makeText(context, "Primero selecciona una impresora.", Toast.LENGTH_SHORT).show()
+                        return@Button
+                    }
+                     coroutineScope.launch {
+                        Toast.makeText(context, "Imprimiendo página de prueba...", Toast.LENGTH_SHORT).show()
+                        val result = BluetoothManager.testPrint(mac)
+                        if (!result.isSuccess) {
+                            Toast.makeText(context, "Error al imprimir: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
+                        }
+                     }
+                }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Imprimir Página de Prueba")
+                }
+
             } else {
                 Button(onClick = { enableBluetooth() }, modifier = Modifier.fillMaxWidth()) {
                     Text("Activar Bluetooth")
@@ -137,14 +148,10 @@ class MainActivity : ComponentActivity() {
             }
 
             Spacer(modifier = Modifier.height(16.dp))
-
-            // Sección de impresora predeterminada
             Text("Impresora predeterminada:", style = MaterialTheme.typography.titleMedium)
             Text(defaultMac ?: "No seleccionada", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.padding(vertical = 8.dp))
 
             Spacer(modifier = Modifier.height(16.dp))
-
-            // Lista de dispositivos emparejados
             Text("Dispositivos emparejados:", style = MaterialTheme.typography.titleMedium)
             if (!isBtEnabled) {
                 Text("Bluetooth está desactivado.", modifier = Modifier.padding(top = 8.dp))
@@ -156,7 +163,7 @@ class MainActivity : ComponentActivity() {
                         DeviceRow(device = device, isDefault = device.address == defaultMac) {
                             saveMac(context, device.address)
                             defaultMac = device.address
-                            Toast.makeText(context, "Impresora guardada: ${device.name}", Toast.LENGTH_SHORT).show()
+                            onRefresh()
                         }
                     }
                 }

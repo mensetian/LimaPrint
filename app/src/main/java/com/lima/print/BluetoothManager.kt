@@ -11,6 +11,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.IOException
+import java.nio.charset.Charset
 import java.util.*
 import kotlin.math.min
 
@@ -93,9 +94,6 @@ object BluetoothManager {
         }
     }
     
-    /**
-     * Establece una conexión persistente sin enviar datos, útil para mantener la luz de estado encendida.
-     */
     suspend fun establishConnection(mac: String): Result<Unit> = withContext(Dispatchers.IO) {
         Log.d(TAG, "Estableciendo conexión persistente con $mac")
         socketMutex.withLock {
@@ -109,15 +107,39 @@ object BluetoothManager {
         }
     }
 
-    suspend fun testFeed(mac: String): Result<Unit> = withContext(Dispatchers.IO) {
-        Log.d(TAG, "Iniciando test de avance de papel para $mac")
-        val feedCommand = byteArrayOf(0x0A, 0x0A, 0x0A)
-        return@withContext sendBytesRaw(
-            mac = mac, 
-            payload = feedCommand, 
-            keepAlive = false,
-            retries = 0
-        )
+    /**
+     * Envía una página de prueba a la impresora. REQUIERE una conexión activa.
+     */
+    suspend fun testPrint(mac: String): Result<Unit> = withContext(Dispatchers.IO) {
+        socketMutex.withLock {
+            if (getConnectedDeviceAddress() != mac) {
+                return@withLock Result.failure(IOException("No está conectado a la impresora de prueba ($mac)."))
+            }
+
+            Log.d(TAG, "Iniciando impresión de prueba para $mac en conexión existente.")
+            val text = "Hola LimaPrint!\nPrueba de impresion exitosa.\n\n\n"
+            val payload: ByteArray
+            try {
+                val init = byteArrayOf(0x1B, 0x40) // Comando de inicialización
+                val textBytes = text.toByteArray(Charset.forName("CP437"))
+                payload = init + textBytes
+            } catch (e: Exception) {
+                return@withLock Result.failure(IOException("No se pudo codificar el texto de prueba.", e))
+            }
+
+            val s = socket ?: return@withLock Result.failure(IOException("Socket nulo a pesar de estar conectado."))
+
+            try {
+                s.outputStream.write(payload)
+                s.outputStream.flush()
+                Log.i(TAG, "Página de prueba enviada exitosamente.")
+                return@withLock Result.success(Unit)
+            } catch (e: IOException) {
+                Log.e(TAG, "Fallo al enviar página de prueba. Se cierra la conexión.", e)
+                closeConnectionInternal()
+                return@withLock Result.failure(IOException("Error de escritura en prueba: ${e.message}", e))
+            }
+        }
     }
 
     @SuppressLint("MissingPermission")
