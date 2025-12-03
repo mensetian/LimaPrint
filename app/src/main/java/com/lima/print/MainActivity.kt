@@ -25,23 +25,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val prefsName = "lima_prefs"
     private val keyMac = "default_printer_mac"
 
-    // Lanzador para la solicitud de activación de Bluetooth
-    private val requestEnableBluetooth = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        // El estado se actualizará en onResume
-    }
+    private val requestEnableBluetooth = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {}
 
-    // Estado para forzar la recomposición y actualización de la lista de dispositivos
     private val refreshSignal = mutableStateOf(0)
 
-    // Lanzador para la solicitud de permisos
     private val requestPermissionsLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
         if (permissions.values.all { it }) {
-            // Si se otorgan los permisos, refrescamos la lista de dispositivos
             refreshSignal.value++
         } else {
             Toast.makeText(this, "Se requieren permisos de Bluetooth para buscar impresoras.", Toast.LENGTH_LONG).show()
@@ -50,7 +45,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Inicializa el BluetoothManager con el contexto de la aplicación. Es vital.
         BluetoothManager.init(applicationContext)
 
         setContent {
@@ -67,23 +61,31 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Forzar un refresco por si el usuario activó Bluetooth desde fuera de la app
         refreshSignal.value++
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // Asegurarse de cerrar la conexión al destruir la actividad principal
+        BluetoothManager.closeConnection()
     }
 
     @SuppressLint("MissingPermission")
     @Composable
     fun MainScreen(refreshSignal: Int, onRefresh: () -> Unit) {
         val context = LocalContext.current
+        val coroutineScope = rememberCoroutineScope()
         var pairedDevices by remember { mutableStateOf<List<BluetoothDevice>>(emptyList()) }
         var defaultMac by remember { mutableStateOf(getSavedMac(context)) }
         val isBtEnabled by remember(refreshSignal) { mutableStateOf(BluetoothManager.isEnabled()) }
+        var connectedMac by remember(refreshSignal) { mutableStateOf(BluetoothManager.getConnectedDeviceAddress()) }
 
-        // Efecto que se ejecuta cuando refreshSignal cambia
         LaunchedEffect(refreshSignal) {
             if (checkAndRequestPermissions(context)) {
                 if (BluetoothManager.isEnabled()) {
                     pairedDevices = BluetoothManager.getPairedDevices().toList()
+                    // Actualizar el estado de conexión al refrescar
+                    connectedMac = BluetoothManager.getConnectedDeviceAddress()
                 }
             }
         }
@@ -91,10 +93,42 @@ class MainActivity : ComponentActivity() {
         Column(modifier = Modifier.padding(16.dp)) {
             Text("Configuración de LimaPrint", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(bottom = 16.dp))
 
-            // Sección de estado y acciones de Bluetooth
+            // Sección de Conexión
+            Text("Estado de la Impresora:", style = MaterialTheme.typography.titleMedium)
+            Text(
+                text = if (connectedMac != null) "Conectado a $connectedMac" else "Desconectado",
+                color = if (connectedMac != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+
             if (isBtEnabled) {
-                Button(onClick = onRefresh, modifier = Modifier.fillMaxWidth()) {
-                    Text("Refrescar lista de impresoras")
+                 Row(modifier = Modifier.fillMaxWidth()) {
+                    Button(onClick = {
+                        val mac = getSavedMac(context)
+                        if (mac.isNullOrBlank()) {
+                            Toast.makeText(context, "Primero selecciona una impresora.", Toast.LENGTH_SHORT).show()
+                        } else {
+                            coroutineScope.launch {
+                                Toast.makeText(context, "Conectando a $mac...", Toast.LENGTH_SHORT).show()
+                                val result = BluetoothManager.establishConnection(mac)
+                                if (result.isSuccess) {
+                                    Toast.makeText(context, "Conexión Exitosa", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    Toast.makeText(context, "Fallo de conexión: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
+                                }
+                                onRefresh()
+                            }
+                        }
+                    }, modifier = Modifier.weight(1f)) {
+                        Text("Conectar")
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(onClick = {
+                        BluetoothManager.closeConnection()
+                        onRefresh()
+                    }, modifier = Modifier.weight(1f)) {
+                        Text("Desconectar")
+                    }
                 }
             } else {
                 Button(onClick = { enableBluetooth() }, modifier = Modifier.fillMaxWidth()) {

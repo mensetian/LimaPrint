@@ -42,10 +42,8 @@ object BluetoothManager {
     @SuppressLint("MissingPermission")
     fun getPairedDevices(): Set<BluetoothDevice> = adapter?.bondedDevices ?: emptySet()
 
-    /**
-     * Envía un array de bytes a la impresora. Se encarga de la conexión y el envío.
-     * Este método es seguro para ser llamado desde múltiples hilos.
-     */
+    fun getConnectedDeviceAddress(): String? = if (socket?.isConnected == true) connectedDevice?.address else null
+
     suspend fun sendBytesRaw(
         mac: String,
         payload: ByteArray,
@@ -64,7 +62,6 @@ object BluetoothManager {
 
                 val s = socket ?: return@withContext Result.failure(IOException("Socket no disponible después de conectar."))
                 
-                // Escribir en el socket
                 try {
                     Log.d(TAG, "Escribiendo ${payload.size} bytes en el socket...")
                     val os = s.outputStream
@@ -95,10 +92,34 @@ object BluetoothManager {
             }
         }
     }
-
+    
     /**
-     * Método interno para conectar. NO usa Mutex, asume que el llamador lo gestiona.
+     * Establece una conexión persistente sin enviar datos, útil para mantener la luz de estado encendida.
      */
+    suspend fun establishConnection(mac: String): Result<Unit> = withContext(Dispatchers.IO) {
+        Log.d(TAG, "Estableciendo conexión persistente con $mac")
+        socketMutex.withLock {
+            val result = connectInternal(mac, DEFAULT_TIMEOUT_MS, DEFAULT_RETRIES)
+            if (result.isSuccess) {
+                Log.i(TAG, "Conexión persistente establecida con $mac.")
+            } else {
+                Log.w(TAG, "Fallo al establecer conexión persistente con $mac.")
+            }
+            return@withLock result
+        }
+    }
+
+    suspend fun testFeed(mac: String): Result<Unit> = withContext(Dispatchers.IO) {
+        Log.d(TAG, "Iniciando test de avance de papel para $mac")
+        val feedCommand = byteArrayOf(0x0A, 0x0A, 0x0A)
+        return@withContext sendBytesRaw(
+            mac = mac, 
+            payload = feedCommand, 
+            keepAlive = false,
+            retries = 0
+        )
+    }
+
     @SuppressLint("MissingPermission")
     private suspend fun connectInternal(mac: String, timeoutMs: Long, retries: Int): Result<Unit> {
         val currentAdapter = adapter ?: return Result.failure(IOException("Bluetooth no inicializado."))
@@ -125,6 +146,14 @@ object BluetoothManager {
                     tmpSocket.connect()
                 }
                 
+                try {
+                    Log.d(TAG, "Enviando comando de inicialización ESC @ a la impresora.")
+                    tmpSocket.outputStream.write(byteArrayOf(0x1B, 0x40))
+                    tmpSocket.outputStream.flush()
+                } catch (e: IOException) {
+                    Log.w(TAG, "No se pudo enviar el comando de inicialización. Se ignora el error.", e)
+                }
+
                 socket = tmpSocket
                 connectedDevice = device
                 Log.i(TAG, "Conectado exitosamente a ${device.name} ($mac)")
@@ -140,9 +169,6 @@ object BluetoothManager {
         return Result.failure(IOException("No se pudo conectar a $mac después de ${retries + 1} intentos", lastEx))
     }
 
-    /**
-     * Cierra forzadamente la conexión. Es seguro llamarlo desde fuera.
-     */
     fun closeConnection() {
         scope.launch {
             socketMutex.withLock {
