@@ -55,18 +55,7 @@ object BluetoothManager {
 
     private fun isSocketConnected(): Boolean {
         val s = socket ?: return false
-        if (!s.isConnected) return false
-
-        // The socket might be "connected" from Android's perspective, but dead.
-        // A common trick is to check if the inputStream is available, as it will throw
-        // an exception on a dead socket. A read of 0 bytes can also work.
-        return try {
-            s.inputStream.available()
-            true
-        } catch (e: IOException) {
-            Log.w(TAG, "isSocketConnected check failed, connection is likely dead.")
-            false
-        }
+        return s.isConnected
     }
 
     suspend fun sendBytesRaw(
@@ -139,29 +128,30 @@ object BluetoothManager {
     @SuppressLint("MissingPermission")
     private suspend fun connectInternal(mac: String, timeoutMs: Long, retries: Int): Result<Unit> {
         val currentAdapter = adapter ?: return Result.failure(IOException("Bluetooth not initialized."))
-        val device = currentAdapter.getRemoteDevice(mac) ?: return Result.failure(IOException("Device not found: $mac"))
 
-        if (isSocketConnected() && device.address == connectedDevice?.address) {
-            Log.d(TAG, "Already connected to this device, reusing socket.")
+        // Si ya estamos conectados al mismo MAC y el socket reporta conexión, retornamos éxito inmediato.
+        if (connectedDevice?.address == mac && isSocketConnected()) {
+            Log.d(TAG, "Already connected to $mac, reusing socket.")
             return Result.success(Unit)
         }
 
+        // Si es un dispositivo diferente o estaba desconectado, cerramos lo anterior.
         closeConnectionInternal()
+
+        val device = currentAdapter.getRemoteDevice(mac) ?: return Result.failure(IOException("Device not found: $mac"))
 
         var lastEx: Exception? = null
         for (attempt in 1..retries + 1) {
             try {
-                Log.d(TAG, "Connection attempt $attempt to $mac...")
+                // ... (lógica de conexión estándar) ...
                 if (currentAdapter.isDiscovering) {
                     currentAdapter.cancelDiscovery()
                 }
-
                 val tmpSocket = device.createRfcommSocketToServiceRecord(SPP_UUID)
 
                 withTimeout(timeoutMs) {
                     tmpSocket.connect()
                 }
-
                 socket = tmpSocket
                 connectedDevice = device
                 Log.i(TAG, "Connected successfully to ${device.name} ($mac)")
@@ -169,9 +159,9 @@ object BluetoothManager {
 
             } catch (e: Exception) {
                 lastEx = e
-                Log.w(TAG, "Connection attempt $attempt failed for $mac: ${e.message}")
-                closeConnectionInternal()
-                if (attempt <= retries) delay(200L * attempt)
+                Log.w(TAG, "Connection attempt $attempt failed: ${e.message}")
+                closeConnectionInternal() // Solo cerramos si falló este intento específico
+                if (attempt <= retries) delay(500L * attempt) // Aumenté un poco el delay para estabilidad
             }
         }
         return Result.failure(IOException("Could not connect to $mac after ${retries + 1} attempts", lastEx))

@@ -39,18 +39,17 @@
         <activity
             android:name=".PrintActivity"
             android:exported="true"
-            android:theme="@android:style/Theme.NoDisplay"
-            android:taskAffinity=""
-            android:excludeFromRecents="true">
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:taskAffinity="com.lima.print"
+            >
             <!-- Deep link for limaprint:// -->
             <intent-filter android:autoVerify="false">
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="limaprint"/>
-                <!-- optional: support rawbt scheme as well -->
                 <data android:scheme="rawbt"/>
-            </intent-filter>.
+            </intent-filter>
         </activity>
 
         <activity

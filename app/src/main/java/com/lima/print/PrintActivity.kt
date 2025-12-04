@@ -11,8 +11,10 @@ import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Activity transparente que recibe limaprint:// links desde el navegador.
@@ -33,13 +35,18 @@ class PrintActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Log.d(TAG, "onCreate: Actividad iniciada.")
+        // No llamamos a setContentView para mantenerlo transparente
+
         BluetoothManager.init(applicationContext)
 
-        lifecycleScope.launch {
+        // Usamos un Scope global o independiente de la vida de esta Activity
+        // para asegurar que el proceso de impresión termine aunque la UI se oculte.
+        CoroutineScope(Dispatchers.Main).launch {
             processIntent()
-            Log.d(TAG, "onCreate: Procesamiento finalizado. Cerrando actividad.")
-            finish()
+
+            // TRUCO FINAL: No mates la actividad con finish().
+            // Mueve la tarea al fondo. Esto mantiene el proceso vivo y el Bluetooth conectado.
+            moveTaskToBack(true)
         }
     }
 
@@ -100,11 +107,13 @@ class PrintActivity : ComponentActivity() {
             }
 
             Log.d(TAG, "processIntent: Todo listo. Enviando ${bytes.size} bytes a $mac...")
-            val result = BluetoothManager.sendBytesRaw(
-                mac = mac,
-                payload = bytes,
-                keepAlive = true
-            )
+            val result = withContext(Dispatchers.IO) {
+                BluetoothManager.sendBytesRaw(
+                    mac = mac,
+                    payload = bytes,
+                    keepAlive = true // ¡CRUCIAL!
+                )
+            }
 
             if (result.isSuccess) {
                 Log.i(TAG, "processIntent: Impresión enviada con éxito.")
