@@ -102,7 +102,8 @@ class PrintActivity : ComponentActivity() {
             Log.d(TAG, "processIntent: Todo listo. Enviando ${bytes.size} bytes a $mac...")
             val result = BluetoothManager.sendBytesRaw(
                 mac = mac,
-                payload = bytes
+                payload = bytes,
+                keepAlive = true
             )
 
             if (result.isSuccess) {
