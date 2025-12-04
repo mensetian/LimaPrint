@@ -1,7 +1,6 @@
 package com.lima.print
 
 import android.Manifest
-import android.content.Context
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -16,21 +15,24 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import androidx.core.app.NotificationCompat
+
 /**
  * Activity transparente que recibe limaprint:// links desde el navegador.
- * Formato admitido (variantes comunes):
- *   limaprint:base64,SGVsbG8gV29ybGQ=
- *   limaprint://base64,SGVsbG8gV29ybGQ=
- *   limaprint://print?data=SGVsbG8=
- *
- * Decodifica y envía bytes a la impresora guardada en SharedPreferences.
  */
 class PrintActivity : ComponentActivity() {
     private val prefsName = "lima_prefs"
     private val keyMac = "default_printer_mac"
+    // Uso de camelCase para la propiedad privada
+    private val notificationTitle = "LIMA"
 
     companion object {
         private const val TAG = "PrintActivity"
+        private const val NOTIFICATION_CHANNEL_ID = "PRINT_STATUS_CHANNEL"
+        // ID único ya que la función simplificada solo envía errores o advertencias
+        private const val NOTIFICATION_PRINT_STATUS_ID = 100
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -39,13 +41,8 @@ class PrintActivity : ComponentActivity() {
 
         BluetoothManager.init(applicationContext)
 
-        // Usamos un Scope global o independiente de la vida de esta Activity
-        // para asegurar que el proceso de impresión termine aunque la UI se oculte.
         CoroutineScope(Dispatchers.Main).launch {
             processIntent()
-
-            // TRUCO FINAL: No mates la actividad con finish().
-            // Mueve la tarea al fondo. Esto mantiene el proceso vivo y el Bluetooth conectado.
             moveTaskToBack(true)
         }
     }
@@ -55,72 +52,84 @@ class PrintActivity : ComponentActivity() {
         try {
             val data: Uri? = intent?.data
             if (data == null) {
-                Log.e(TAG, "processIntent: No hay datos (Uri) en el intent.")
                 showToast("No hay datos en el intent")
                 return
             }
-            Log.d(TAG, "processIntent: URI recibida: $data")
 
             val raw = data.schemeSpecificPart ?: data.toString()
             val base64Payload = extractBase64(raw, data)
             if (base64Payload.isNullOrBlank()) {
-                Log.e(TAG, "processIntent: No se pudo extraer el payload Base64 de la URI: $raw")
                 showToast("Formato de URL inválido. Se esperaba 'base64,DATA'.")
                 return
             }
-            Log.d(TAG, "processIntent: Payload Base64 extraído (primeros 50 chars): ${base64Payload.take(50)}...")
 
             val bytes = try {
                 Base64.decode(base64Payload, Base64.DEFAULT)
-            } catch (e: IllegalArgumentException) {
-                Log.e(TAG, "processIntent: El payload Base64 es inválido.", e)
+            } catch (_: IllegalArgumentException) {
                 showToast("Payload Base64 inválido")
                 return
             }
-            Log.d(TAG, "processIntent: Payload decodificado a ${bytes.size} bytes.")
 
-            val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+            val prefs = getSharedPreferences(prefsName, MODE_PRIVATE)
             val mac = prefs.getString(keyMac, null)
             if (mac.isNullOrBlank()) {
-                Log.e(TAG, "processIntent: No se encontró MAC guardada en SharedPreferences.")
                 showToast("No hay impresora predeterminada. Abre LimaPrint y selecciona una.")
                 return
             }
-            Log.d(TAG, "processIntent: MAC de impresora encontrada: $mac")
 
-            // --- COMPROBACIÓN DE PERMISOS ---
             if (!hasRequiredPermissions()) {
-                Log.e(TAG, "processIntent: Faltan permisos de Bluetooth. Abortando.")
                 showToast("Faltan permisos de Bluetooth. Abre LimaPrint para otorgarlos.")
                 return
             }
 
-            if (!BluetoothManager.isBluetoothAvailable()) {
-                Log.e(TAG, "processIntent: Bluetooth no está disponible en el dispositivo.")
-                showToast("Bluetooth no soportado en este dispositivo.")
+            if (!BluetoothManager.isBluetoothAvailable() || !BluetoothManager.isEnabled()) {
+                showToast("Bluetooth no disponible")
                 return
             }
-            if (!BluetoothManager.isEnabled()) {
-                Log.e(TAG, "processIntent: Bluetooth está desactivado.")
-                showToast("Bluetooth está desactivado. Actívalo e intenta de nuevo.")
+
+            // 1. INTENTO DE CONEXIÓN
+            val connectResult = withContext(Dispatchers.IO) {
+                BluetoothManager.establishConnection(mac)
+            }
+
+            if (connectResult.isFailure) {
+                showToast("Error al conectar: ${connectResult.exceptionOrNull()?.message}")
                 return
             }
+
+            // 2. CHEQUEO DEL ESTADO DEL PAPEL
+            val paperStatus = BluetoothManager.checkPaperStatus()
+
+            when (paperStatus) {
+                PrinterPaperStatus.OUT_OF_PAPER -> {
+                    showNotification("🚨️ La impresora no puede imprimir. ¡Cargue un nuevo rollo ahora!")
+                    return
+                }
+                PrinterPaperStatus.LOW_PAPER -> {
+                    showNotification("⚠️ Papel casi agotado. El rollo está por terminarse. Reemplácelo pronto.")
+                }
+                PrinterPaperStatus.OK -> {
+                    // Continuar
+                }
+                PrinterPaperStatus.ERROR, PrinterPaperStatus.DISCONNECTED -> {
+                    showToast("Error al obtener estado de papel. Intentando imprimir...")
+                }
+            }
+
 
             Log.d(TAG, "processIntent: Todo listo. Enviando ${bytes.size} bytes a $mac...")
             val result = withContext(Dispatchers.IO) {
                 BluetoothManager.sendBytesRaw(
                     mac = mac,
                     payload = bytes,
-                    keepAlive = true // ¡CRUCIAL!
+                    keepAlive = true
                 )
             }
 
             if (result.isSuccess) {
-                Log.i(TAG, "processIntent: Impresión enviada con éxito.")
                 showToast("Impresión enviada")
             } else {
                 val error = result.exceptionOrNull()
-                Log.e(TAG, "processIntent: Fallo al imprimir: ${error?.message}", error)
                 showToast("Error de impresión: ${error?.message ?: "Error desconocido"}")
             }
         } catch (e: Exception) {
@@ -129,6 +138,43 @@ class PrintActivity : ComponentActivity() {
         }
     }
 
+    // --- FUNCIÓN DE NOTIFICACIÓN ---
+    // Función simplificada para solo recibir el mensaje, usando el título constante.
+    private fun showNotification(message: String) {
+        val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        val channelId = NOTIFICATION_CHANNEL_ID
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (notificationManager.getNotificationChannel(channelId) == null) {
+                val name = "Estado de Impresión"
+                val importance = NotificationManager.IMPORTANCE_HIGH
+                val channel = NotificationChannel(channelId, name, importance)
+                notificationManager.createNotificationChannel(channel)
+            }
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                Log.w(TAG, "Permiso POST_NOTIFICATIONS denegado. No se puede mostrar la notificación.")
+                return
+            }
+        }
+
+        val notification = NotificationCompat.Builder(this, channelId)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle(notificationTitle)
+            .setContentText(message)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .build()
+
+        // Usamos un ID fijo para que las notificaciones de estado se reemplacen.
+        notificationManager.notify(NOTIFICATION_PRINT_STATUS_ID, notification)
+
+        Log.d(TAG, "Notificación '$notificationTitle' enviada con éxito.")
+    }
+
+    // --- FUNCIONES AUXILIARES ---
     private fun hasRequiredPermissions(): Boolean {
         val hasPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             ContextCompat.checkSelfPermission(
@@ -138,7 +184,6 @@ class PrintActivity : ComponentActivity() {
         } else {
             true
         }
-        Log.d(TAG, "hasRequiredPermissions: ¿Tiene permisos? $hasPermission")
         return hasPermission
     }
 
@@ -161,6 +206,7 @@ class PrintActivity : ComponentActivity() {
     }
 
     private fun showToast(text: String) {
-        runOnUiThread { Toast.makeText(this@PrintActivity, text, Toast.LENGTH_LONG).show() }
+        // Uso de applicationContext para evitar crashes si la Activity es destruida rápidamente
+        runOnUiThread { Toast.makeText(applicationContext, text, Toast.LENGTH_LONG).show() }
     }
 }

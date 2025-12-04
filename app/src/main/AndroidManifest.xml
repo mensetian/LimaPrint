@@ -39,8 +39,11 @@
         <activity
             android:name=".PrintActivity"
             android:exported="true"
-            android:theme="@android:style/Theme.Translucent.NoTitleBar"
-            android:taskAffinity="com.lima.print"
+
+            android:theme="@style/Theme.TransparentDeepLink"
+
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
             >
             <!-- Deep link for limaprint:// -->
             <intent-filter android:autoVerify="false">

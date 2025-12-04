@@ -15,6 +15,16 @@ import java.nio.charset.Charset
 import java.util.*
 import kotlin.math.min
 
+// ENUM: Define los posibles estados del papel (Necesario para que compile PrintActivity)
+enum class PrinterPaperStatus {
+    OK,
+    LOW_PAPER,
+    OUT_OF_PAPER,
+    ERROR,
+    DISCONNECTED
+}
+
+
 object BluetoothManager {
     private const val TAG = "BluetoothManager"
     private val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
@@ -53,10 +63,70 @@ object BluetoothManager {
 
     fun getConnectedDeviceAddress(): String? = if (isSocketConnected()) connectedDevice?.address else null
 
+    // CORRECCIÓN CLAVE 1: Simplificar la verificación.
+    // La comprobación de `inputStream.available()` causaba la desconexión falsa (bug inicial).
     private fun isSocketConnected(): Boolean {
-        val s = socket ?: return false
-        return s.isConnected
+        // Solo verificamos si el socket existe y si la API de Android reporta que está conectado.
+        return socket?.isConnected == true
     }
+
+    // NUEVA FUNCIÓN: Consulta el estado del papel (Necesario para que compile PrintActivity)
+    suspend fun checkPaperStatus(): PrinterPaperStatus = socketMutex.withLock {
+        if (socket == null || !isSocketConnected()) {
+            Log.e(TAG, "checkPaperStatus: Socket no conectado.")
+            return PrinterPaperStatus.DISCONNECTED
+        }
+
+        try {
+            val outputStream = socket!!.outputStream
+            val inputStream = socket!!.inputStream
+
+            // Comando ESC/POS DLE EOT 4: Request paper roll sensor status (16, 4, 4)
+            val command = byteArrayOf(0x10, 0x04, 0x04)
+
+            withContext(Dispatchers.IO) {
+                outputStream.write(command)
+                outputStream.flush()
+            }
+
+            // Esperar y leer la respuesta (Bloqueante, debe estar en Dispatchers.IO)
+            val statusByte = withContext(Dispatchers.IO) {
+                val buffer = ByteArray(1)
+                // Usamos un timeout para evitar bloqueo indefinido.
+                // Lamentablemente, la API Bluetooth de Android no ofrece una forma sencilla
+                // de read() con timeout, por lo que confiamos en el timeout de la corrutina.
+                try {
+                    // Ponemos un pequeño timeout en la corrutina para la lectura
+                    withTimeout(2000L) {
+                        val readCount = inputStream.read(buffer, 0, 1)
+                        if (readCount == 1) buffer[0].toInt() else -1
+                    }
+                } catch (e: TimeoutCancellationException) {
+                    Log.e(TAG, "checkPaperStatus: Timeout al esperar respuesta.")
+                    -1
+                }
+            }
+
+            if (statusByte < 0) return PrinterPaperStatus.ERROR
+
+            // Interpretar el byte de respuesta (Bits 3 y 5)
+            val isLowPaper = (statusByte and 0x08) != 0
+            val isOutPaper = (statusByte and 0x20) != 0
+
+            return when {
+                isOutPaper -> PrinterPaperStatus.OUT_OF_PAPER
+                isLowPaper -> PrinterPaperStatus.LOW_PAPER
+                else -> PrinterPaperStatus.OK
+            }
+
+        } catch (e: IOException) {
+            Log.e(TAG, "checkPaperStatus: Error de IO al consultar estado.", e)
+            return PrinterPaperStatus.ERROR
+        }
+    }
+
+
+    // ... (El resto de sendBytesRaw se mantiene igual)
 
     suspend fun sendBytesRaw(
         mac: String,
@@ -104,9 +174,11 @@ object BluetoothManager {
         }
     }
 
+
     suspend fun establishConnection(mac: String): Result<Unit> = withContext(Dispatchers.IO) {
         Log.d(TAG, "Establishing persistent connection to $mac")
         socketMutex.withLock {
+            // Se usa el connectInternal privado
             connectInternal(mac, DEFAULT_TIMEOUT_MS, DEFAULT_RETRIES)
         }
     }
@@ -128,30 +200,29 @@ object BluetoothManager {
     @SuppressLint("MissingPermission")
     private suspend fun connectInternal(mac: String, timeoutMs: Long, retries: Int): Result<Unit> {
         val currentAdapter = adapter ?: return Result.failure(IOException("Bluetooth not initialized."))
+        val device = currentAdapter.getRemoteDevice(mac) ?: return Result.failure(IOException("Device not found: $mac"))
 
-        // Si ya estamos conectados al mismo MAC y el socket reporta conexión, retornamos éxito inmediato.
-        if (connectedDevice?.address == mac && isSocketConnected()) {
-            Log.d(TAG, "Already connected to $mac, reusing socket.")
+        if (isSocketConnected() && device.address == connectedDevice?.address) {
+            Log.d(TAG, "Already connected to this device, reusing socket.")
             return Result.success(Unit)
         }
 
-        // Si es un dispositivo diferente o estaba desconectado, cerramos lo anterior.
         closeConnectionInternal()
-
-        val device = currentAdapter.getRemoteDevice(mac) ?: return Result.failure(IOException("Device not found: $mac"))
 
         var lastEx: Exception? = null
         for (attempt in 1..retries + 1) {
             try {
-                // ... (lógica de conexión estándar) ...
+                Log.d(TAG, "Connection attempt $attempt to $mac...")
                 if (currentAdapter.isDiscovering) {
                     currentAdapter.cancelDiscovery()
                 }
+
                 val tmpSocket = device.createRfcommSocketToServiceRecord(SPP_UUID)
 
                 withTimeout(timeoutMs) {
                     tmpSocket.connect()
                 }
+
                 socket = tmpSocket
                 connectedDevice = device
                 Log.i(TAG, "Connected successfully to ${device.name} ($mac)")
@@ -159,9 +230,9 @@ object BluetoothManager {
 
             } catch (e: Exception) {
                 lastEx = e
-                Log.w(TAG, "Connection attempt $attempt failed: ${e.message}")
-                closeConnectionInternal() // Solo cerramos si falló este intento específico
-                if (attempt <= retries) delay(500L * attempt) // Aumenté un poco el delay para estabilidad
+                Log.w(TAG, "Connection attempt $attempt failed for $mac: ${e.message}")
+                closeConnectionInternal()
+                if (attempt <= retries) delay(200L * attempt)
             }
         }
         return Result.failure(IOException("Could not connect to $mac after ${retries + 1} attempts", lastEx))
