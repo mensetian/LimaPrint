@@ -134,7 +134,31 @@ class MainActivity : ComponentActivity() {
         }
 
         // Nombre legible de la predeterminada: la MAC sola no le dice nada a nadie.
-        val defaultName = pairedDevices.firstOrNull { it.address == defaultMac }?.name
+        // Ojo: que no tenga nombre no significa que no esté — muchas térmicas
+        // baratas no reportan ninguno. Lo que importa es si sigue emparejada.
+        val defaultDevice = pairedDevices.firstOrNull { it.address == defaultMac }
+        val defaultName = defaultDevice?.name
+
+        // Se muestran todos los emparejados, pero primero los que se anuncian como
+        // impresora. La clase Bluetooth ordena la lista; no decide qué se puede usar.
+        val printers = pairedDevices.filter { BluetoothManager.isLikelyPrinter(it) }
+        val others = pairedDevices.filterNot { BluetoothManager.isLikelyPrinter(it) }
+
+        val onSelectDevice: (BluetoothDevice) -> Unit = { device ->
+            saveMac(context, device.address)
+            // Que la elección se vea al toque: conectar puede tardar sus buenos
+            // segundos entre reintentos, y mientras tanto la pantalla decía
+            // "Ninguna" como si el toque no hubiera hecho nada.
+            onRefresh()
+            coroutineScope.launch {
+                Toast.makeText(context, "Guardado y conectando...", Toast.LENGTH_SHORT).show()
+                val result = BluetoothManager.establishConnection(device.address)
+                if (!result.isSuccess) {
+                    Toast.makeText(context, "Fallo al conectar.", Toast.LENGTH_SHORT).show()
+                }
+                onRefresh()
+            }
+        }
 
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
@@ -219,11 +243,12 @@ class MainActivity : ComponentActivity() {
             Text(
                 text = when {
                     defaultMac == null -> "Ninguna. Elegí una de la lista de abajo."
+                    defaultDevice == null -> "$defaultMac — ya no aparece emparejada"
                     defaultName != null -> "$defaultName · $defaultMac"
-                    else -> "$defaultMac — ya no aparece emparejada"
+                    else -> defaultMac.orEmpty()
                 },
                 style = MaterialTheme.typography.bodyLarge,
-                color = if (defaultMac != null && defaultName == null)
+                color = if (defaultMac != null && defaultDevice == null)
                     MaterialTheme.colorScheme.error
                 else
                     MaterialTheme.colorScheme.onSurface,
@@ -231,24 +256,40 @@ class MainActivity : ComponentActivity() {
             )
 
             Spacer(modifier = Modifier.height(16.dp))
-            Text("Dispositivos emparejados:", style = MaterialTheme.typography.titleMedium)
+            Text(
+                if (printers.isNotEmpty()) "Impresoras emparejadas:" else "Dispositivos emparejados:",
+                style = MaterialTheme.typography.titleMedium
+            )
             if (pairedDevices.isEmpty()) {
                 EmptyDevices(modifier = Modifier.weight(1f))
             } else {
                 // Se usa la forma concisa del argumento modifier para evitar warnings
                 LazyColumn(Modifier.weight(1f)) {
-                    items(pairedDevices) { device ->
+                    items(printers) { device ->
                         DeviceRow(device = device, isDefault = device.address == defaultMac) {
-                            saveMac(context, device.address)
-                            coroutineScope.launch {
-                                Toast.makeText(context, "Guardado y conectando...", Toast.LENGTH_SHORT)
-                                    .show()
-                                val result = BluetoothManager.establishConnection(device.address)
-                                if (!result.isSuccess) {
-                                    Toast.makeText(context, "Fallo al conectar.", Toast.LENGTH_SHORT)
-                                        .show()
-                                }
-                                onRefresh()
+                            onSelectDevice(device)
+                        }
+                    }
+
+                    if (others.isNotEmpty()) {
+                        item {
+                            Spacer(modifier = Modifier.height(if (printers.isEmpty()) 0.dp else 20.dp))
+                            Text(
+                                "Otros dispositivos emparejados",
+                                style = MaterialTheme.typography.titleSmall
+                            )
+                            Text(
+                                "No se anuncian como impresora, pero podés elegirlos igual: " +
+                                        "muchas térmicas se declaran con otra clase o sin " +
+                                        "clasificar.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 4.dp, bottom = 8.dp)
+                            )
+                        }
+                        items(others) { device ->
+                            DeviceRow(device = device, isDefault = device.address == defaultMac) {
+                                onSelectDevice(device)
                             }
                         }
                     }
@@ -258,10 +299,9 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Qué mostrar cuando no hay ninguna impresora en la lista. Pasa seguido y el
+     * Qué mostrar cuando el celular no tiene ningún dispositivo emparejado. El
      * hueco en blanco no explicaba nada: LimaPrint no empareja, solo usa lo que ya
-     * está emparejado en el sistema, y además filtra por clase Bluetooth de
-     * impresión, así que una térmica que se anuncia con otra clase tampoco aparece.
+     * está emparejado en el sistema.
      */
     @Composable
     fun EmptyDevices(modifier: Modifier = Modifier) {
@@ -271,14 +311,14 @@ class MainActivity : ComponentActivity() {
                 .padding(top = 8.dp)
         ) {
             Text(
-                "Ninguna impresora emparejada todavía.",
+                "Ningún dispositivo emparejado todavía.",
                 style = MaterialTheme.typography.bodyLarge
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
                 "Emparejá la térmica desde Ajustes › Bluetooth del celular y volvé " +
                         "acá. LimaPrint no empareja: solo lista lo que el sistema ya " +
-                        "tiene emparejado y se anuncia como impresora.",
+                        "tiene emparejado.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

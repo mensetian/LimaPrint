@@ -40,6 +40,9 @@ object BluetoothManager {
     private const val DEFAULT_CHUNK_DELAY_MS = 40L
     private const val DEFAULT_RETRIES = 1
 
+    // 0x680: imaging > printer, el valor que reportan las térmicas bien portadas
+    private const val PRINTER_DEVICE_CLASS = 1664
+
     fun init(context: Context) {
         if (adapter == null) {
             val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager
@@ -50,15 +53,28 @@ object BluetoothManager {
     fun isBluetoothAvailable(): Boolean = adapter != null
     fun isEnabled(): Boolean = adapter?.isEnabled == true
 
+    /**
+     * Todos los dispositivos emparejados del sistema, sin filtrar.
+     *
+     * Antes acá se devolvían solo los de clase "impresora", pero muchas térmicas
+     * baratas se anuncian con otra clase (o sin clasificar) y desaparecían de la
+     * lista sin ninguna explicación. Filtrar era esconder. Ahora se devuelve todo
+     * y la pantalla separa lo probable de lo demás con [isLikelyPrinter], que es
+     * una pista, no un veto.
+     */
     @SuppressLint("MissingPermission")
-    fun getPairedDevices(): Set<BluetoothDevice> {
-        val devices = adapter?.bondedDevices ?: return emptySet()
-        return devices.filter {
-            val deviceClass = it.bluetoothClass
-            deviceClass != null &&
-                    deviceClass.majorDeviceClass == BluetoothClass.Device.Major.IMAGING &&
-                    deviceClass.deviceClass == 1664
-        }.toSet()
+    fun getPairedDevices(): Set<BluetoothDevice> = adapter?.bondedDevices ?: emptySet()
+
+    /**
+     * Si el dispositivo se anuncia a sí mismo como impresora. Sirve para ordenar
+     * la lista, no para decidir a qué se puede imprimir: el que diga que no,
+     * igual se puede elegir.
+     */
+    @SuppressLint("MissingPermission")
+    fun isLikelyPrinter(device: BluetoothDevice): Boolean {
+        val deviceClass = device.bluetoothClass ?: return false
+        return deviceClass.majorDeviceClass == BluetoothClass.Device.Major.IMAGING &&
+                deviceClass.deviceClass == PRINTER_DEVICE_CLASS
     }
 
     fun getConnectedDeviceAddress(): String? = if (isSocketConnected()) connectedDevice?.address else null
